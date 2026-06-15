@@ -1,0 +1,2 @@
+[console_scripts]
+log-redact = log_redaction.cli:app

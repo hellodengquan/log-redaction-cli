@@ -1,0 +1,10 @@
+2026-06-15 09:12:33 INFO  UserService 用户登录成功 user_id=10086 phone=138****5678
+2026-06-15 09:12:45 DEBUG AuthService 验证码已发送至 mobile: 139****5432
+2026-06-15 09:13:01 WARN  OrderService 订单创建异常，联系邮箱 s******@example.com 获取帮助
+2026-06-15 09:13:15 INFO  PaymentService 支付完成，用户邮箱 z************@company.org
+2026-06-15 09:13:28 INFO  NotificationService 短信通知已发送到 156****1111
+2026-06-15 09:13:40 ERROR UserService 用户注册失败 phone=137****2222 email=t***********@mail.test.io 错误: 手机号已存在
+2026-06-15 09:14:02 INFO  AuditService 管理员操作 a****@internal.cn ip=192.168.1.100
+2026-06-15 09:14:15 DEBUG CacheService 缓存刷新完成 key=user_profile_10086
+2026-06-15 09:14:28 INFO  LogoutService 用户登出 phone: 188****9999
+2026-06-15 09:14:45 INFO  FeedbackService 收到用户反馈 邮箱: a****@domain.co.uk 内容: 页面加载缓慢

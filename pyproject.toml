@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "log-redaction-cli"
+version = "0.1.0"
+description = "A CLI tool for scanning and redacting sensitive information (phone numbers, emails) in log files"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Log Redaction Team" }]
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+log-redact = "log_redaction.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

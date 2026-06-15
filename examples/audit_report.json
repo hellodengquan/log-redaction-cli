@@ -1,0 +1,108 @@
+{
+  "source_file": "/Users/dengquan/Downloads/job/code-annotation/dogfeeding/solo/code/173-log-redaction-cli/examples/sample.log",
+  "output_file": "/Users/dengquan/Downloads/job/code-annotation/dogfeeding/solo/code/173-log-redaction-cli/examples/sample_redacted.log",
+  "timestamp": "2026-06-15T11:43:25.869253",
+  "summary": {
+    "total_count": 10,
+    "by_type": {
+      "phone": 5,
+      "email": 5
+    },
+    "by_pattern": {
+      "china-mobile-phone": 5,
+      "email-address": 5
+    }
+  },
+  "entries": [
+    {
+      "line_number": 1,
+      "sensitive_type": "phone",
+      "pattern_name": "china-mobile-phone",
+      "original_value": "13812345678",
+      "redacted_value": "138****5678",
+      "start_pos": 65,
+      "end_pos": 76
+    },
+    {
+      "line_number": 2,
+      "sensitive_type": "phone",
+      "pattern_name": "china-mobile-phone",
+      "original_value": "139-9876-5432",
+      "redacted_value": "139****5432",
+      "start_pos": 54,
+      "end_pos": 67
+    },
+    {
+      "line_number": 3,
+      "sensitive_type": "email",
+      "pattern_name": "email-address",
+      "original_value": "support@example.com",
+      "redacted_value": "s******@example.com",
+      "start_pos": 51,
+      "end_pos": 70
+    },
+    {
+      "line_number": 4,
+      "sensitive_type": "email",
+      "pattern_name": "email-address",
+      "original_value": "zhangsan.2024@company.org",
+      "redacted_value": "z************@company.org",
+      "start_pos": 51,
+      "end_pos": 76
+    },
+    {
+      "line_number": 5,
+      "sensitive_type": "phone",
+      "pattern_name": "china-mobile-phone",
+      "original_value": "+86 156 0000 1111",
+      "redacted_value": "156****1111",
+      "start_pos": 55,
+      "end_pos": 72
+    },
+    {
+      "line_number": 6,
+      "sensitive_type": "phone",
+      "pattern_name": "china-mobile-phone",
+      "original_value": "13711112222",
+      "redacted_value": "137****2222",
+      "start_pos": 51,
+      "end_pos": 62
+    },
+    {
+      "line_number": 6,
+      "sensitive_type": "email",
+      "pattern_name": "email-address",
+      "original_value": "test_user123@mail.test.io",
+      "redacted_value": "t***********@mail.test.io",
+      "start_pos": 69,
+      "end_pos": 94
+    },
+    {
+      "line_number": 7,
+      "sensitive_type": "email",
+      "pattern_name": "email-address",
+      "original_value": "admin@internal.cn",
+      "redacted_value": "a****@internal.cn",
+      "start_pos": 45,
+      "end_pos": 62
+    },
+    {
+      "line_number": 9,
+      "sensitive_type": "phone",
+      "pattern_name": "china-mobile-phone",
+      "original_value": "18866669999",
+      "redacted_value": "188****9999",
+      "start_pos": 52,
+      "end_pos": 63
+    },
+    {
+      "line_number": 10,
+      "sensitive_type": "email",
+      "pattern_name": "email-address",
+      "original_value": "a.b+c@domain.co.uk",
+      "redacted_value": "a****@domain.co.uk",
+      "start_pos": 53,
+      "end_pos": 71
+    }
+  ]
+}
