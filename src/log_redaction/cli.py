@@ -7,7 +7,10 @@
 - scan:    仅扫描敏感信息（不修改文件）
 - audit:   生成脱敏审计报告
 - verify:  校验审计报告的 hash 链完整性
+- decrypt: 解密加密文件
 - rules:   查看已启用的检测规则
+- upload:  上传审计报告/脱敏文件到合规存储
+- rotate:  轮转加密密钥
 """
 
 from __future__ import annotations
@@ -23,12 +26,15 @@ from rich.table import Table
 
 from .audit import AuditExporter, AuditLog
 from .crypto import EncryptionConfig, FileEncryptor, is_encrypted_file
+from .kms import KmsEncryptor, LocalKeyProvider, create_key_provider, is_kms_encrypted
+from .limiter import ResourceLimitExceeded, ResourceLimits, ResourceLimiter, format_size
 from .redactor import DEFAULT_CHUNK_LINES, DEFAULT_WORKERS, Redactor
 from .rules import (
     SensitiveType,
     RuleConfigLoader,
     get_default_patterns,
 )
+from .storage import LocalArchiveUploader, create_uploader
 
 app = typer.Typer(
     help="日志脱敏 CLI 工具 - 扫描并脱敏日志中的手机号、邮箱等敏感信息",
@@ -276,11 +282,62 @@ def redact(
         "--encrypt-audit",
         help="加密审计报告",
     ),
+    max_input_size: int = typer.Option(
+        0,
+        "--max-input-size",
+        help="输入文件大小上限(MB)，0=不限",
+    ),
+    max_output_size: int = typer.Option(
+        0,
+        "--max-output-size",
+        help="输出文件大小上限(MB)，0=不限",
+    ),
+    max_line_length: int = typer.Option(
+        0,
+        "--max-line-length",
+        help="单行最大字节长度，0=不限",
+    ),
+    max_memory: int = typer.Option(
+        0,
+        "--max-memory",
+        help="最大内存使用(MB)，0=不限",
+    ),
+    kms_backend: Optional[str] = typer.Option(
+        None,
+        "--kms-backend",
+        help="KMS 密钥后端: local, age",
+    ),
+    kms_key_dir: Optional[Path] = typer.Option(
+        None,
+        "--kms-key-dir",
+        help="KMS 密钥存储目录",
+    ),
 ) -> None:
     """对日志文件执行脱敏处理。"""
     try:
+        limiter: Optional[ResourceLimiter] = None
+        if max_input_size or max_output_size or max_line_length or max_memory:
+            limits = ResourceLimits(
+                max_input_file_size=max_input_size * 1024 * 1024 if max_input_size else 0,
+                max_output_file_size=max_output_size * 1024 * 1024 if max_output_size else 0,
+                max_line_length=max_line_length if max_line_length else 0,
+                max_memory_mb=max_memory if max_memory else 0,
+            )
+            limiter = ResourceLimiter(limits)
+            if max_memory:
+                limiter.apply_memory_limit()
+            limiter.check_input_file(input_path)
+
         encryptor: Optional[FileEncryptor] = None
-        if encryption_password:
+        kms_encryptor: Optional[KmsEncryptor] = None
+        if kms_backend:
+            provider = create_key_provider(
+                backend=kms_backend,
+                password=encryption_password,
+                key_dir=kms_key_dir,
+            )
+            kms_encryptor = KmsEncryptor(provider)
+        elif encryption_password:
             encrypt_config = EncryptionConfig(password=encryption_password)
             encryptor = FileEncryptor(encrypt_config)
 
@@ -310,10 +367,14 @@ def redact(
             encrypt_output=encrypt_output,
             encrypt_audit=encrypt_audit,
             encryption_password=encryption_password,
+            resource_limiter=limiter,
         )
         _print_summary(audit_log)
         audit_encryptor = encryptor if encrypt_audit else None
         _export_audit(audit_log, audit_output, audit_format, encryptor=audit_encryptor)
+    except ResourceLimitExceeded as e:
+        console.print(f"[red]✗ 资源超限: {e}[/red]")
+        raise typer.Exit(code=3)
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]✗ 错误: {e}[/red]")
         raise typer.Exit(code=1)
@@ -685,6 +746,124 @@ def list_rules(
 def main() -> None:
     """程序入口函数。"""
     app()
+
+
+@app.command("upload")
+def upload(
+    file_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="要上传的文件路径",
+    ),
+    storage_backend: str = typer.Option(
+        "local",
+        "--storage",
+        "-S",
+        help="存储后端: local, s3",
+    ),
+    archive_dir: Optional[Path] = typer.Option(
+        None,
+        "--archive-dir",
+        help="本地归档目录（local 后端）",
+    ),
+    s3_bucket: Optional[str] = typer.Option(
+        None,
+        "--s3-bucket",
+        help="S3 存储桶名称",
+    ),
+    s3_prefix: str = typer.Option(
+        "audit-reports/",
+        "--s3-prefix",
+        help="S3 对象前缀",
+    ),
+    s3_endpoint: Optional[str] = typer.Option(
+        None,
+        "--s3-endpoint",
+        help="S3 兼容端点 URL",
+    ),
+    remote_key: Optional[str] = typer.Option(
+        None,
+        "--key",
+        "-k",
+        help="远程存储键名（默认使用文件名）",
+    ),
+) -> None:
+    """上传审计报告或脱敏文件到合规存储。"""
+    try:
+        kwargs: dict = {}
+        if storage_backend == "local":
+            kwargs["archive_dir"] = archive_dir or Path("./archive")
+        elif storage_backend in ("s3", "minio", "oss"):
+            if not s3_bucket:
+                console.print("[red]✗ S3 后端需要指定 --s3-bucket[/red]")
+                raise typer.Exit(code=1)
+            kwargs["bucket"] = s3_bucket
+            kwargs["prefix"] = s3_prefix
+            if s3_endpoint:
+                kwargs["endpoint_url"] = s3_endpoint
+
+        uploader = create_uploader(backend=storage_backend, **kwargs)
+        result = uploader.upload(file_path, remote_key=remote_key)
+
+        if result.success:
+            console.print(f"[green]✓ 上传成功[/green]")
+            console.print(f"  目标: {result.destination}")
+            console.print(f"  大小: {format_size(result.file_size)}")
+            console.print(f"  SHA-256: {result.checksum_sha256[:16]}...")
+            console.print(f"  时间: {result.uploaded_at}")
+        else:
+            console.print(f"[red]✗ 上传失败: {result.error}[/red]")
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗ 上传失败: {e}[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command("rotate")
+def rotate_key(
+    kms_backend: str = typer.Option(
+        "local",
+        "--kms-backend",
+        help="密钥后端: local, age",
+    ),
+    encryption_password: Optional[str] = typer.Option(
+        None,
+        "--encrypt-password",
+        "-E",
+        help="密钥密码（local 后端）",
+    ),
+    kms_key_dir: Optional[Path] = typer.Option(
+        None,
+        "--kms-key-dir",
+        help="密钥存储目录",
+    ),
+    key_id: str = typer.Option(
+        "default",
+        "--key-id",
+        help="密钥标识",
+    ),
+) -> None:
+    """轮转加密密钥，生成新版本。"""
+    try:
+        provider = create_key_provider(
+            backend=kms_backend,
+            password=encryption_password,
+            key_dir=kms_key_dir,
+            key_id=key_id,
+        )
+        new_version = provider.rotate()
+        console.print(f"[green]✓ 密钥轮转成功[/green]")
+        console.print(f"  后端: {kms_backend}")
+        console.print(f"  密钥ID: {key_id}")
+        console.print(f"  新版本: {new_version}")
+    except Exception as e:
+        console.print(f"[red]✗ 密钥轮转失败: {e}[/red]")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

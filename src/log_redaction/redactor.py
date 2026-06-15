@@ -18,6 +18,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from .audit import AuditEntry, AuditLog
 from .crypto import EncryptionConfig, FileEncryptor
+from .limiter import ResourceLimiter, ResourceLimitExceeded
 from .readers import LogReader, get_reader
 from .rules import SensitivePattern, get_default_patterns
 
@@ -349,30 +350,18 @@ class Redactor:
         encrypt_output: bool = False,
         encrypt_audit: bool = False,
         encryption_password: Optional[str] = None,
+        resource_limiter: Optional[ResourceLimiter] = None,
     ) -> AuditLog:
-        """处理日志文件，执行脱敏并生成审计日志。
-
-        Args:
-            input_path: 输入日志文件路径
-            output_path: 输出文件路径
-            in_place: 是否原地覆盖输入文件
-            workers: 并发进程数（覆盖构造参数）
-            chunk_lines: 每分片行数（覆盖构造参数）
-            log_format: 日志格式：text, json, syslog（覆盖构造参数）
-            json_message_field: JSON 格式的消息字段名（覆盖构造参数）
-            encrypt_output: 是否加密输出文件
-            encrypt_audit: 是否加密审计报告
-            encryption_password: 加密密码（覆盖构造参数中的配置）
-
-        Returns:
-            审计日志对象
-        """
+        """处理日志文件，执行脱敏并生成审计日志。"""
         input_path = Path(input_path)
         if not input_path.is_file():
             raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
         if not in_place and output_path is None:
             raise ValueError("必须指定 output_path 或设置 in_place=True")
+
+        if resource_limiter is not None:
+            resource_limiter.check_input_file(input_path)
 
         target_output = input_path if in_place else Path(output_path)
 
@@ -395,6 +384,10 @@ class Redactor:
         entries, raw_lines = self._reader.read_file(input_path)
         messages = [e.message for e in entries]
 
+        if resource_limiter is not None:
+            for msg in messages:
+                resource_limiter.check_line(msg)
+
         num_workers = workers if workers is not None else self._workers
         if num_workers and num_workers > 1 and len(messages) > self._chunk_lines:
             redacted_messages, audit_log = self.scan_lines_parallel(
@@ -414,6 +407,8 @@ class Redactor:
             output_lines.append(formatted + newline)
 
         output_content = "".join(output_lines).encode("utf-8")
+        if resource_limiter is not None:
+            resource_limiter.check_output_size(len(output_content))
         if encrypt_output and encryptor is not None:
             output_content = encryptor.encrypt_bytes(output_content)
             with target_output.open("wb") as f:

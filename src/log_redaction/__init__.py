@@ -35,8 +35,34 @@ from .readers import (
     SyslogReader,
     get_reader,
 )
+from .kms import (
+    KeyProvider,
+    LocalKeyProvider,
+    AgeKeyProvider,
+    KmsEncryptor,
+    KeyMetadata,
+    KeyVersion,
+    create_key_provider,
+    is_kms_encrypted,
+)
+from .storage import (
+    StorageUploader,
+    LocalArchiveUploader,
+    S3Uploader,
+    UploadResult,
+    UploadManifest,
+    create_uploader,
+)
+from .limiter import (
+    ResourceLimits,
+    ResourceLimiter,
+    ResourceLimitExceeded,
+    stream_lines,
+    stream_lines_batch,
+    format_size,
+)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "SensitivePattern",
     "SensitiveType",
@@ -63,4 +89,24 @@ __all__ = [
     "JsonLinesReader",
     "SyslogReader",
     "get_reader",
+    "KeyProvider",
+    "LocalKeyProvider",
+    "AgeKeyProvider",
+    "KmsEncryptor",
+    "KeyMetadata",
+    "KeyVersion",
+    "create_key_provider",
+    "is_kms_encrypted",
+    "StorageUploader",
+    "LocalArchiveUploader",
+    "S3Uploader",
+    "UploadResult",
+    "UploadManifest",
+    "create_uploader",
+    "ResourceLimits",
+    "ResourceLimiter",
+    "ResourceLimitExceeded",
+    "stream_lines",
+    "stream_lines_batch",
+    "format_size",
 ]

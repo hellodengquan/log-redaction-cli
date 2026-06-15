@@ -676,3 +676,182 @@ class TestCLIEncryptedHashChainVerify:
         assert audit_data["summary"]["total_count"] == 3
         assert audit_data["hash_chain"]["valid"] is True
         assert len(audit_data["entries"]) == 3
+
+
+class TestCLIUpload:
+    def test_upload_audit_to_local_archive(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text("phone 13812345678\n", encoding="utf-8")
+        out = tmp_path / "out.log"
+        audit = tmp_path / "audit.json"
+        result = runner.invoke(
+            app,
+            ["redact", str(src), "-o", str(out), "-a", str(audit)],
+        )
+        assert result.exit_code == 0
+        archive_dir = tmp_path / "archive"
+        upload_result = runner.invoke(
+            app,
+            ["upload", str(audit), "-S", "local", "--archive-dir", str(archive_dir)],
+        )
+        assert upload_result.exit_code == 0
+        assert "上传成功" in upload_result.stdout
+        archived = list(archive_dir.rglob("audit.json"))
+        assert len(archived) >= 1
+        manifest = archive_dir / "upload_manifest.json"
+        assert manifest.exists()
+
+    def test_upload_nonexistent_file_fails(self, tmp_path: Path):
+        result = runner.invoke(
+            app,
+            ["upload", str(tmp_path / "nonexistent.json"), "-S", "local", "--archive-dir", str(tmp_path / "archive")],
+        )
+        assert result.exit_code != 0
+
+    def test_upload_redacted_output(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text("phone 13812345678\n", encoding="utf-8")
+        out = tmp_path / "out.log"
+        runner.invoke(app, ["redact", str(src), "-o", str(out)])
+        archive_dir = tmp_path / "archive"
+        upload_result = runner.invoke(
+            app,
+            ["upload", str(out), "-S", "local", "--archive-dir", str(archive_dir)],
+        )
+        assert upload_result.exit_code == 0
+        assert "SHA-256" in upload_result.stdout
+
+
+class TestCLIResourceLimits:
+    def test_input_file_too_large(self, tmp_path: Path):
+        src = tmp_path / "big.log"
+        src.write_text("x" * 200 + "\n", encoding="utf-8")
+        out = tmp_path / "out.log"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "--max-input-size",
+                "1",
+            ],
+        )
+        assert result.exit_code == 0
+
+    def test_input_file_size_limit_enforced(self, tmp_path: Path):
+        from log_redaction.limiter import ResourceLimits, ResourceLimiter
+        limiter = ResourceLimiter(ResourceLimits(max_input_file_size=10))
+        with pytest.raises(Exception, match="资源超限"):
+            src = tmp_path / "big.log"
+            src.write_text("x" * 200, encoding="utf-8")
+            limiter.check_input_file(src)
+
+    def test_line_too_long(self, tmp_path: Path):
+        from log_redaction.limiter import ResourceLimits, ResourceLimiter
+        limiter = ResourceLimiter(ResourceLimits(max_line_length=50))
+        with pytest.raises(Exception, match="资源超限"):
+            limiter.check_line("x" * 200)
+
+    def test_within_limits_ok(self, tmp_path: Path):
+        src = tmp_path / "normal.log"
+        src.write_text("phone 13812345678\n", encoding="utf-8")
+        out = tmp_path / "out.log"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "--max-input-size",
+                "100",
+                "--max-line-length",
+                "1000",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "138****5678" in out.read_text()
+
+    def test_help_shows_resource_options(self):
+        result = runner.invoke(app, ["redact", "--help"])
+        assert result.exit_code == 0
+        assert "--max-input-size" in result.stdout
+        assert "--max-output-size" in result.stdout
+        assert "--max-line-length" in result.stdout
+        assert "--max-memory" in result.stdout
+        assert "--kms-backend" in result.stdout
+
+
+class TestCLIKeyRotation:
+    def test_rotate_key_local(self, tmp_path: Path):
+        key_dir = tmp_path / "keys"
+        result = runner.invoke(
+            app,
+            [
+                "rotate",
+                "--kms-backend",
+                "local",
+                "-E",
+                "test-password",
+                "--kms-key-dir",
+                str(key_dir),
+                "--key-id",
+                "e2e-test",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "密钥轮转成功" in result.stdout
+        assert "local" in result.stdout
+
+    def test_rotate_creates_metadata(self, tmp_path: Path):
+        key_dir = tmp_path / "keys"
+        runner.invoke(
+            app,
+            [
+                "rotate",
+                "--kms-backend",
+                "local",
+                "-E",
+                "test-password",
+                "--kms-key-dir",
+                str(key_dir),
+                "--key-id",
+                "meta-test",
+            ],
+        )
+        meta_path = key_dir / "meta-test.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text())
+        assert len(meta["versions"]) >= 1
+
+    def test_rotate_multiple_versions(self, tmp_path: Path):
+        key_dir = tmp_path / "keys"
+        for _ in range(3):
+            runner.invoke(
+                app,
+                [
+                    "rotate",
+                    "--kms-backend",
+                    "local",
+                    "-E",
+                    "test-password",
+                    "--kms-key-dir",
+                    str(key_dir),
+                    "--key-id",
+                    "multi-ver",
+                ],
+            )
+        meta = json.loads((key_dir / "multi-ver.json").read_text())
+        assert len(meta["versions"]) >= 3
+        active_count = sum(1 for v in meta["versions"] if v["active"])
+        assert active_count == 1
+
+
+class TestCLIHelpShowsNewCommands:
+    def test_help_shows_upload_and_rotate(self):
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        for name in ("redact", "scan", "audit", "verify", "decrypt", "rules", "upload", "rotate"):
+            assert name in result.stdout
