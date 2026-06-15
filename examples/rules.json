@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "name": "internal-order-secret",
+      "type": "custom",
+      "pattern": "ORD-[A-Z]{2}\\d{8}",
+      "redaction": "mask_last_half",
+      "description": "内部订单号脱敏（后半段打码）",
+      "lang": "all",
+      "enabled": true
+    },
+    {
+      "name": "company-tax-id",
+      "type": "id_card",
+      "pattern": "\\d{15,18}",
+      "redaction": "mask_all",
+      "description": "企业税号完全脱敏",
+      "lang": "zh-CN",
+      "enabled": false
+    }
+  ]
+}
