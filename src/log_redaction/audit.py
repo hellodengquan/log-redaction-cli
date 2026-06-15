@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .crypto import FileEncryptor
+
 
 def _compute_hash(data: str) -> str:
     """计算 SHA-256 哈希。"""
@@ -199,13 +201,40 @@ class AuditExporter:
         }
 
     @staticmethod
-    def export_json(audit_log: AuditLog, output_path: Path) -> None:
+    def export_json(audit_log: AuditLog, output_path: Path, encryptor: Optional[FileEncryptor] = None) -> None:
         """导出为 JSON 格式。"""
         data = AuditExporter.to_dict(audit_log)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        if encryptor is not None:
+            content = encryptor.encrypt_bytes(content)
+            with output_path.open("wb") as f:
+                f.write(content)
+        else:
+            with output_path.open("w", encoding="utf-8") as f:
+                f.write(content.decode("utf-8"))
+
+    @staticmethod
+    def export_encrypted_json(
+        audit_log: AuditLog,
+        output_path: Path,
+        encryptor: FileEncryptor,
+    ) -> None:
+        """导出为加密的 JSON 格式（AES-GCM）。"""
+        AuditExporter.export_json(audit_log, output_path, encryptor=encryptor)
+
+    @staticmethod
+    def decrypt_and_load_json(
+        input_path: Path,
+        encryptor: FileEncryptor,
+    ) -> dict:
+        """解密并加载加密的 JSON 审计报告。"""
+        input_path = Path(input_path)
+        with input_path.open("rb") as f:
+            encrypted = f.read()
+        plaintext = encryptor.decrypt_bytes(encrypted)
+        return json.loads(plaintext.decode("utf-8"))
 
     @staticmethod
     def export_csv(audit_log: AuditLog, output_path: Path) -> None:
@@ -301,8 +330,12 @@ class AuditExporter:
             f.write("\n".join(lines))
 
     @staticmethod
-    def verify_json_chain(json_path: Path) -> Tuple[bool, str]:
+    def verify_json_chain(json_path: Path, encryptor: Optional[FileEncryptor] = None) -> Tuple[bool, str]:
         """从 JSON 文件加载并校验 hash 链完整性。
+
+        Args:
+            json_path: JSON 审计报告路径
+            encryptor: 可选的解密器，用于加密的审计报告
 
         Returns:
             (是否有效, 描述信息)
@@ -311,10 +344,15 @@ class AuditExporter:
         if not json_path.exists():
             return False, f"文件不存在: {json_path}"
         try:
-            with json_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+            if encryptor is not None:
+                data = AuditExporter.decrypt_and_load_json(json_path, encryptor)
+            else:
+                with json_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
         except json.JSONDecodeError as e:
             return False, f"JSON 解析失败: {e}"
+        except Exception as e:
+            return False, f"加载失败: {e}"
 
         entries_raw = data.get("entries", [])
         prev_hash = GENESIS_PREV_HASH

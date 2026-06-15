@@ -22,6 +22,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .audit import AuditExporter, AuditLog
+from .crypto import EncryptionConfig, FileEncryptor, is_encrypted_file
 from .redactor import DEFAULT_CHUNK_LINES, DEFAULT_WORKERS, Redactor
 from .rules import (
     SensitiveType,
@@ -37,6 +38,7 @@ app = typer.Typer(
 console = Console()
 
 AUDIT_FORMATS = ["json", "csv", "markdown"]
+LOG_FORMATS = ["text", "json", "syslog"]
 
 
 def _build_redactor(
@@ -50,6 +52,9 @@ def _build_redactor(
     config_file: Optional[Path] = None,
     workers: int = 0,
     chunk_lines: int = DEFAULT_CHUNK_LINES,
+    log_format: str = "text",
+    json_message_field: str = "message",
+    encryption_password: Optional[str] = None,
 ) -> Redactor:
     """根据参数构建脱敏处理器（保持与原协议兼容并支持扩展）。"""
     patterns = []
@@ -86,7 +91,19 @@ def _build_redactor(
 
     if not patterns:
         patterns = [p for p in defaults if p.enabled]
-    return Redactor(patterns=patterns, workers=workers, chunk_lines=chunk_lines)
+
+    encryption_config = None
+    if encryption_password:
+        encryption_config = EncryptionConfig(password=encryption_password)
+
+    return Redactor(
+        patterns=patterns,
+        workers=workers,
+        chunk_lines=chunk_lines,
+        log_format=log_format,
+        json_message_field=json_message_field,
+        encryption_config=encryption_config,
+    )
 
 
 def _print_summary(audit_log: AuditLog) -> None:
@@ -123,20 +140,24 @@ def _export_audit(
     audit_log: AuditLog,
     output_path: Optional[Path],
     fmt: str,
+    encryptor: Optional[FileEncryptor] = None,
 ) -> None:
     """根据格式导出审计报告。"""
     if output_path is None:
         return
     fmt = fmt.lower()
     if fmt == "json":
-        AuditExporter.export_json(audit_log, output_path)
+        AuditExporter.export_json(audit_log, output_path, encryptor=encryptor)
     elif fmt == "csv":
         AuditExporter.export_csv(audit_log, output_path)
     elif fmt == "markdown":
         AuditExporter.export_markdown(audit_log, output_path)
     else:
         raise typer.BadParameter(f"不支持的审计格式: {fmt}")
-    console.print(f"[green]✓ 审计报告已导出至: {output_path}[/green]")
+    msg = f"✓ 审计报告已导出至: {output_path}"
+    if encryptor is not None:
+        msg += " (已加密)"
+    console.print(f"[green]{msg}[/green]")
 
 
 @app.command("redact")
@@ -228,9 +249,41 @@ def redact(
         "--chunk-lines",
         help="每分片行数（仅并发模式）",
     ),
+    log_format: str = typer.Option(
+        "text",
+        "--log-format",
+        "-F",
+        help=f"输入日志格式，可选: {', '.join(LOG_FORMATS)}",
+    ),
+    json_message_field: str = typer.Option(
+        "message",
+        "--json-field",
+        help="JSON 格式中需要脱敏的消息字段名",
+    ),
+    encryption_password: Optional[str] = typer.Option(
+        None,
+        "--encrypt-password",
+        "-E",
+        help="加密输出文件和审计报告的密码",
+    ),
+    encrypt_output: bool = typer.Option(
+        False,
+        "--encrypt-output",
+        help="加密脱敏后的输出文件",
+    ),
+    encrypt_audit: bool = typer.Option(
+        False,
+        "--encrypt-audit",
+        help="加密审计报告",
+    ),
 ) -> None:
     """对日志文件执行脱敏处理。"""
     try:
+        encryptor: Optional[FileEncryptor] = None
+        if encryption_password:
+            encrypt_config = EncryptionConfig(password=encryption_password)
+            encryptor = FileEncryptor(encrypt_config)
+
         redactor = _build_redactor(
             include_phone=include_phone,
             include_email=include_email,
@@ -242,6 +295,9 @@ def redact(
             config_file=config_file,
             workers=workers,
             chunk_lines=chunk_lines,
+            log_format=log_format,
+            json_message_field=json_message_field,
+            encryption_password=encryption_password,
         )
         audit_log = redactor.process_file(
             input_path=input_path,
@@ -249,9 +305,15 @@ def redact(
             in_place=in_place,
             workers=workers if workers > 0 else None,
             chunk_lines=chunk_lines,
+            log_format=log_format,
+            json_message_field=json_message_field,
+            encrypt_output=encrypt_output,
+            encrypt_audit=encrypt_audit,
+            encryption_password=encryption_password,
         )
         _print_summary(audit_log)
-        _export_audit(audit_log, audit_output, audit_format)
+        audit_encryptor = encryptor if encrypt_audit else None
+        _export_audit(audit_log, audit_output, audit_format, encryptor=audit_encryptor)
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]✗ 错误: {e}[/red]")
         raise typer.Exit(code=1)
@@ -311,6 +373,17 @@ def scan(
         file_okay=True,
         dir_okay=False,
     ),
+    log_format: str = typer.Option(
+        "text",
+        "--log-format",
+        "-F",
+        help=f"输入日志格式，可选: {', '.join(LOG_FORMATS)}",
+    ),
+    json_message_field: str = typer.Option(
+        "message",
+        "--json-field",
+        help="JSON 格式中需要脱敏的消息字段名",
+    ),
     show_lines: bool = typer.Option(
         False,
         "--show-lines",
@@ -329,10 +402,14 @@ def scan(
             include_us_ssn=include_us_ssn,
             lang=lang,
             config_file=config_file,
+            log_format=log_format,
+            json_message_field=json_message_field,
         )
-        with input_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-        _, audit_log = redactor.scan_lines(lines)
+        from .readers import get_reader
+        reader = get_reader(log_format, json_message_field)
+        entries, raw_lines = reader.read_file(input_path)
+        messages = [e.message for e in entries]
+        _, audit_log = redactor.scan_lines(messages)
         audit_log.source_file = str(input_path.resolve())
         _print_summary(audit_log)
 
@@ -426,9 +503,36 @@ def audit_cmd(
         "-w",
         help="并发 worker 数",
     ),
+    log_format: str = typer.Option(
+        "text",
+        "--log-format",
+        "-F",
+        help=f"输入日志格式，可选: {', '.join(LOG_FORMATS)}",
+    ),
+    json_message_field: str = typer.Option(
+        "message",
+        "--json-field",
+        help="JSON 格式中需要脱敏的消息字段名",
+    ),
+    encryption_password: Optional[str] = typer.Option(
+        None,
+        "--encrypt-password",
+        "-E",
+        help="加密审计报告的密码",
+    ),
+    encrypt_audit: bool = typer.Option(
+        False,
+        "--encrypt",
+        help="加密审计报告",
+    ),
 ) -> None:
     """生成脱敏审计报告（不修改原文件）。"""
     try:
+        encryptor: Optional[FileEncryptor] = None
+        if encryption_password and encrypt_audit:
+            encrypt_config = EncryptionConfig(password=encryption_password)
+            encryptor = FileEncryptor(encrypt_config)
+
         redactor = _build_redactor(
             include_phone=include_phone,
             include_email=include_email,
@@ -439,16 +543,21 @@ def audit_cmd(
             lang=lang,
             config_file=config_file,
             workers=workers,
+            log_format=log_format,
+            json_message_field=json_message_field,
+            encryption_password=encryption_password if encrypt_audit else None,
         )
-        with input_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
+        from .readers import get_reader
+        reader = get_reader(log_format, json_message_field)
+        entries, raw_lines = reader.read_file(input_path)
+        messages = [e.message for e in entries]
         if workers > 1:
-            _, audit_log = redactor.scan_lines_parallel(lines, workers=workers)
+            _, audit_log = redactor.scan_lines_parallel(messages, workers=workers)
         else:
-            _, audit_log = redactor.scan_lines(lines)
+            _, audit_log = redactor.scan_lines(messages)
         audit_log.source_file = str(input_path.resolve())
         audit_log.output_file = str(output_path.resolve())
-        _export_audit(audit_log, output_path, format)
+        _export_audit(audit_log, output_path, format, encryptor=encryptor)
         _print_summary(audit_log)
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]✗ 错误: {e}[/red]")
@@ -465,15 +574,67 @@ def verify(
         readable=True,
         help="审计报告 JSON 文件路径",
     ),
+    encryption_password: Optional[str] = typer.Option(
+        None,
+        "--encrypt-password",
+        "-E",
+        help="加密审计报告的解密密码",
+    ),
 ) -> None:
     """校验审计报告的 hash 链完整性。"""
-    valid, message = AuditExporter.verify_json_chain(audit_path)
+    encryptor: Optional[FileEncryptor] = None
+    if encryption_password:
+        encrypt_config = EncryptionConfig(password=encryption_password)
+        encryptor = FileEncryptor(encrypt_config)
+    valid, message = AuditExporter.verify_json_chain(audit_path, encryptor=encryptor)
     if valid:
         console.print(f"[green]✓ {message}[/green]")
         raise typer.Exit(code=0)
     else:
         console.print(f"[red]✗ {message}[/red]")
         raise typer.Exit(code=2)
+
+
+@app.command("decrypt")
+def decrypt_file(
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="加密的文件路径",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="解密后的输出文件路径",
+    ),
+    encryption_password: str = typer.Option(
+        ...,
+        "--encrypt-password",
+        "-E",
+        prompt="请输入解密密码",
+        hide_input=True,
+        help="解密密码",
+    ),
+) -> None:
+    """解密加密的日志文件或审计报告。"""
+    try:
+        if not is_encrypted_file(input_path):
+            console.print(f"[yellow]⚠ 警告: 文件似乎不是 LRED 加密格式，将原样复制[/yellow]")
+            output_path.write_bytes(input_path.read_bytes())
+            console.print(f"[green]✓ 文件已复制至: {output_path}[/green]")
+            raise typer.Exit(code=0)
+
+        encrypt_config = EncryptionConfig(password=encryption_password)
+        encryptor = FileEncryptor(encrypt_config)
+        encryptor.decrypt_file(input_path, output_path)
+        console.print(f"[green]✓ 文件已成功解密至: {output_path}[/green]")
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗ 解密失败: {e}[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command("rules")

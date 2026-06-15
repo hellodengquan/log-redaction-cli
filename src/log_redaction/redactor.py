@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 from .audit import AuditEntry, AuditLog
+from .crypto import EncryptionConfig, FileEncryptor
+from .readers import LogReader, get_reader
 from .rules import SensitivePattern, get_default_patterns
 
 
@@ -157,12 +159,22 @@ class Redactor:
         patterns: Optional[List[SensitivePattern]] = None,
         workers: int = 0,
         chunk_lines: int = DEFAULT_CHUNK_LINES,
+        log_format: str = "text",
+        json_message_field: str = "message",
+        encryption_config: Optional[EncryptionConfig] = None,
     ) -> None:
         self._patterns = patterns if patterns is not None else [
             p for p in get_default_patterns() if p.enabled
         ]
         self._workers = max(0, workers)
         self._chunk_lines = max(100, chunk_lines)
+        self._log_format = log_format
+        self._json_message_field = json_message_field
+        self._reader: LogReader = get_reader(log_format, json_message_field)
+        self._encryption_config = encryption_config
+        self._encryptor: Optional[FileEncryptor] = (
+            FileEncryptor(encryption_config) if encryption_config else None
+        )
 
     @property
     def patterns(self) -> List[SensitivePattern]:
@@ -332,6 +344,11 @@ class Redactor:
         in_place: bool = False,
         workers: Optional[int] = None,
         chunk_lines: Optional[int] = None,
+        log_format: Optional[str] = None,
+        json_message_field: Optional[str] = None,
+        encrypt_output: bool = False,
+        encrypt_audit: bool = False,
+        encryption_password: Optional[str] = None,
     ) -> AuditLog:
         """处理日志文件，执行脱敏并生成审计日志。
 
@@ -341,6 +358,11 @@ class Redactor:
             in_place: 是否原地覆盖输入文件
             workers: 并发进程数（覆盖构造参数）
             chunk_lines: 每分片行数（覆盖构造参数）
+            log_format: 日志格式：text, json, syslog（覆盖构造参数）
+            json_message_field: JSON 格式的消息字段名（覆盖构造参数）
+            encrypt_output: 是否加密输出文件
+            encrypt_audit: 是否加密审计报告
+            encryption_password: 加密密码（覆盖构造参数中的配置）
 
         Returns:
             审计日志对象
@@ -354,21 +376,76 @@ class Redactor:
 
         target_output = input_path if in_place else Path(output_path)
 
-        with input_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
+        if log_format is not None:
+            self._log_format = log_format
+            self._json_message_field = (
+                json_message_field
+                if json_message_field is not None
+                else self._json_message_field
+            )
+            self._reader = get_reader(self._log_format, self._json_message_field)
+
+        encryptor: Optional[FileEncryptor] = None
+        if encryption_password is not None:
+            encrypt_config = EncryptionConfig(password=encryption_password)
+            encryptor = FileEncryptor(encrypt_config)
+        elif self._encryptor is not None:
+            encryptor = self._encryptor
+
+        entries, raw_lines = self._reader.read_file(input_path)
+        messages = [e.message for e in entries]
 
         num_workers = workers if workers is not None else self._workers
-        if num_workers and num_workers > 1 and len(lines) > self._chunk_lines:
-            redacted_lines, audit_log = self.scan_lines_parallel(
-                lines, workers=num_workers, chunk_lines=chunk_lines
+        if num_workers and num_workers > 1 and len(messages) > self._chunk_lines:
+            redacted_messages, audit_log = self.scan_lines_parallel(
+                messages, workers=num_workers, chunk_lines=chunk_lines
             )
         else:
-            redacted_lines, audit_log = self.scan_lines(lines)
+            redacted_messages, audit_log = self.scan_lines(messages)
 
         audit_log.source_file = str(input_path.resolve())
         audit_log.output_file = str(target_output.resolve())
+        audit_log.finalize()
 
-        with target_output.open("w", encoding="utf-8") as f:
-            f.writelines(redacted_lines)
+        output_lines = []
+        for entry, redacted_msg in zip(entries, redacted_messages):
+            formatted = self._reader.format_entry(entry, redacted_msg.rstrip("\n"))
+            newline = "\n" if entry.raw.endswith("\n") else ""
+            output_lines.append(formatted + newline)
+
+        output_content = "".join(output_lines).encode("utf-8")
+        if encrypt_output and encryptor is not None:
+            output_content = encryptor.encrypt_bytes(output_content)
+            with target_output.open("wb") as f:
+                f.write(output_content)
+        else:
+            with target_output.open("w", encoding="utf-8") as f:
+                f.writelines(output_lines)
+
+        if encrypt_audit and encryptor is not None:
+            audit_log._encryptor = encryptor
 
         return audit_log
+
+    def process_file_with_reader(
+        self,
+        input_path: Path,
+        reader: LogReader,
+        output_path: Optional[Path] = None,
+        in_place: bool = False,
+        workers: Optional[int] = None,
+        chunk_lines: Optional[int] = None,
+        encryptor: Optional[FileEncryptor] = None,
+        encrypt_output: bool = False,
+    ) -> AuditLog:
+        """使用自定义 reader 处理文件（高级 API）。"""
+        self._reader = reader
+        return self.process_file(
+            input_path=input_path,
+            output_path=output_path,
+            in_place=in_place,
+            workers=workers,
+            chunk_lines=chunk_lines,
+            encrypt_output=encrypt_output,
+            encryption_password=None,
+        )

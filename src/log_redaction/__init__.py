@@ -21,8 +21,22 @@ from .audit import (
     AuditExporter,
     GENESIS_PREV_HASH,
 )
+from .crypto import (
+    FileEncryptor,
+    EncryptionConfig,
+    is_encrypted_file,
+    encrypt_json_log,
+    decrypt_json_log,
+)
+from .readers import (
+    LogReader,
+    TextReader,
+    JsonLinesReader,
+    SyslogReader,
+    get_reader,
+)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "SensitivePattern",
     "SensitiveType",
@@ -39,4 +53,14 @@ __all__ = [
     "AuditEntry",
     "AuditExporter",
     "GENESIS_PREV_HASH",
+    "FileEncryptor",
+    "EncryptionConfig",
+    "is_encrypted_file",
+    "encrypt_json_log",
+    "decrypt_json_log",
+    "LogReader",
+    "TextReader",
+    "JsonLinesReader",
+    "SyslogReader",
+    "get_reader",
 ]

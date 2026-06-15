@@ -276,3 +276,403 @@ class TestCLIParallelLargeFile:
 
         r3 = runner.invoke(app, ["verify", str(audit_p)])
         assert r3.exit_code == 0
+
+
+class TestCLIEncryption:
+    def test_encrypt_output_file(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text(
+            "2026-06-15 user phone=13812345678 email=alice@example.com\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "app_redacted.enc"
+        audit = tmp_path / "audit.json"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-a",
+                str(audit),
+                "-E",
+                "mypassword",
+                "--encrypt-output",
+            ],
+        )
+        assert result.exit_code == 0
+        assert out.exists()
+        from log_redaction.crypto import is_encrypted_file
+        assert is_encrypted_file(out) is True
+
+        decrypted = tmp_path / "decrypted.log"
+        decrypt_result = runner.invoke(
+            app,
+            [
+                "decrypt",
+                str(out),
+                str(decrypted),
+                "-E",
+                "mypassword",
+            ],
+        )
+        assert decrypt_result.exit_code == 0
+        content = decrypted.read_text(encoding="utf-8")
+        assert "138****5678" in content
+        assert "a****@example.com" in content
+
+    def test_encrypt_audit_report(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text("user phone 13812345678\n", encoding="utf-8")
+        out = tmp_path / "redacted.log"
+        audit_enc = tmp_path / "audit_enc.json"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-a",
+                str(audit_enc),
+                "-E",
+                "mypassword",
+                "--encrypt-audit",
+            ],
+        )
+        assert result.exit_code == 0
+        assert audit_enc.exists()
+        from log_redaction.crypto import is_encrypted_file
+        assert is_encrypted_file(audit_enc) is True
+
+        verify_result = runner.invoke(
+            app,
+            ["verify", str(audit_enc), "-E", "mypassword"],
+        )
+        assert verify_result.exit_code == 0
+        assert "完整有效" in verify_result.stdout
+
+        verify_wrong_pw = runner.invoke(
+            app,
+            ["verify", str(audit_enc), "-E", "wrongpassword"],
+        )
+        assert verify_wrong_pw.exit_code != 0
+
+    def test_decrypt_wrong_password(self, tmp_path: Path):
+        from log_redaction.crypto import EncryptionConfig, FileEncryptor
+        src = tmp_path / "src.log"
+        src.write_text("hello")
+        enc = tmp_path / "src.enc"
+        enc_config = EncryptionConfig(password="rightpassword")
+        encryptor = FileEncryptor(enc_config)
+        encryptor.encrypt_file(src, enc)
+
+        out = tmp_path / "out.log"
+        result = runner.invoke(
+            app,
+            ["decrypt", str(enc), str(out), "-E", "wrongpassword"],
+        )
+        assert result.exit_code == 1
+        assert "解密失败" in result.stdout
+
+    def test_audit_command_with_encrypt(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text("phone 13812345678\n", encoding="utf-8")
+        audit_enc = tmp_path / "audit_enc.json"
+        result = runner.invoke(
+            app,
+            [
+                "audit",
+                str(src),
+                str(audit_enc),
+                "--encrypt",
+                "-E",
+                "auditpass",
+            ],
+        )
+        assert result.exit_code == 0
+        assert audit_enc.exists()
+        from log_redaction.crypto import is_encrypted_file
+        assert is_encrypted_file(audit_enc) is True
+
+        verify_result = runner.invoke(
+            app,
+            ["verify", str(audit_enc), "-E", "auditpass"],
+        )
+        assert verify_result.exit_code == 0
+
+    def test_decrypt_non_encrypted_file(self, tmp_path: Path):
+        src = tmp_path / "plain.txt"
+        src.write_text("not encrypted")
+        out = tmp_path / "out.txt"
+        result = runner.invoke(
+            app,
+            ["decrypt", str(src), str(out), "-E", "anypassword"],
+        )
+        assert result.exit_code == 0
+        assert "不是 LRED 加密格式" in result.stdout
+        assert out.read_text() == "not encrypted"
+
+    def test_help_shows_encrypt_options(self):
+        result = runner.invoke(app, ["redact", "--help"])
+        assert result.exit_code == 0
+        assert "--encrypt-password" in result.stdout
+        assert "--encrypt-output" in result.stdout
+        assert "--encrypt-audit" in result.stdout
+        assert "--log-format" in result.stdout
+
+
+class TestCLIMultiFormatReader:
+    def test_json_lines_format(self, tmp_path: Path):
+        src = tmp_path / "app.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "timestamp": "2026-06-15T10:00:00",
+                    "level": "INFO",
+                    "message": "User login phone 13812345678 email alice@example.com",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            json.dumps(
+                {
+                    "timestamp": "2026-06-15T10:00:01",
+                    "level": "ERROR",
+                    "message": "User login phone 13999998888",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+        ]
+        src.write_text("".join(lines), encoding="utf-8")
+        out = tmp_path / "redacted.jsonl"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-F",
+                "json",
+                "--json-field",
+                "message",
+            ],
+        )
+        assert result.exit_code == 0
+        assert out.exists()
+        out_lines = out.read_text(encoding="utf-8").strip().split("\n")
+        assert len(out_lines) == 2
+        obj1 = json.loads(out_lines[0])
+        assert obj1["timestamp"] == "2026-06-15T10:00:00"
+        assert obj1["level"] == "INFO"
+        assert "138****5678" in obj1["message"]
+        assert "a****@example.com" in obj1["message"]
+        obj2 = json.loads(out_lines[1])
+        assert obj2["level"] == "ERROR"
+        assert "139****8888" in obj2["message"]
+
+    def test_json_format_custom_field(self, tmp_path: Path):
+        src = tmp_path / "data.jsonl"
+        line = json.dumps(
+            {"time": "now", "logmsg": "contact 13812345678"},
+            ensure_ascii=False,
+        )
+        src.write_text(line + "\n", encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-F",
+                "json",
+                "--json-field",
+                "logmsg",
+            ],
+        )
+        assert result.exit_code == 0
+        obj = json.loads(out.read_text().strip())
+        assert obj["time"] == "now"
+        assert "138****5678" in obj["logmsg"]
+
+    def test_syslog_rfc5424_format(self, tmp_path: Path):
+        src = tmp_path / "syslog.log"
+        lines = [
+            '<134>1 2026-06-15T10:00:00.000Z myhost myapp 1234 - - User login phone 13812345678\n',
+            '<134>1 2026-06-15T10:00:01.000Z myhost myapp 1235 - - Send email to bob@test.com\n',
+        ]
+        src.write_text("".join(lines), encoding="utf-8")
+        out = tmp_path / "redacted_syslog.log"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-F",
+                "syslog",
+            ],
+        )
+        assert result.exit_code == 0
+        out_lines = out.read_text(encoding="utf-8").strip().split("\n")
+        assert len(out_lines) == 2
+        assert "138****5678" in out_lines[0]
+        assert "<134>1 2026-06-15T10:00:00.000Z myhost myapp 1234" in out_lines[0]
+        assert "b**@test.com" in out_lines[1]
+        assert "<134>1 2026-06-15T10:00:01.000Z myhost myapp 1235" in out_lines[1]
+
+    def test_syslog_rfc3164_format(self, tmp_path: Path):
+        src = tmp_path / "bsd_syslog.log"
+        line = '<134>Jun 15 10:00:00 myhost myapp[1234]: phone 13812345678'
+        src.write_text(line + "\n", encoding="utf-8")
+        out = tmp_path / "out.log"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-F",
+                "syslog",
+            ],
+        )
+        assert result.exit_code == 0
+        content = out.read_text(encoding="utf-8")
+        assert "<134>Jun 15 10:00:00 myhost myapp[1234]" in content
+        assert "138****5678" in content
+
+    def test_scan_command_with_format(self, tmp_path: Path):
+        src = tmp_path / "app.jsonl"
+        line = json.dumps({"msg": "contact 13812345678"})
+        src.write_text(line + "\n", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "scan",
+                str(src),
+                "-F",
+                "json",
+                "--json-field",
+                "msg",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "共检测并脱敏 1 条" in result.stdout
+
+    def test_audit_command_with_format(self, tmp_path: Path):
+        src = tmp_path / "app.jsonl"
+        line = json.dumps({"message": "phone 13812345678"})
+        src.write_text(line + "\n", encoding="utf-8")
+        audit_out = tmp_path / "audit.json"
+        result = runner.invoke(
+            app,
+            [
+                "audit",
+                str(src),
+                str(audit_out),
+                "-F",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(audit_out.read_text())
+        assert data["summary"]["total_count"] == 1
+
+    def test_help_shows_log_format(self):
+        result = runner.invoke(app, ["redact", "--help"])
+        assert result.exit_code == 0
+        assert "--log-format" in result.stdout
+        assert "--json-field" in result.stdout
+
+    def test_invalid_log_format(self, tmp_path: Path):
+        src = tmp_path / "test.log"
+        src.write_text("phone 13812345678\n")
+        out = tmp_path / "out.log"
+        result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-F",
+                "invalid_format",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "不支持的日志格式" in result.stdout
+
+
+class TestCLIEncryptedHashChainVerify:
+    def test_full_encrypted_audit_verify_flow(self, tmp_path: Path):
+        src = tmp_path / "app.log"
+        src.write_text(
+            "line1 phone 13812345678\n"
+            "line2 phone 13999998888\n"
+            "line3 email alice@example.com\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "out.enc"
+        audit_enc = tmp_path / "audit.enc.json"
+
+        redact_result = runner.invoke(
+            app,
+            [
+                "redact",
+                str(src),
+                "-o",
+                str(out),
+                "-a",
+                str(audit_enc),
+                "-E",
+                "strongpassword123",
+                "--encrypt-output",
+                "--encrypt-audit",
+            ],
+        )
+        assert redact_result.exit_code == 0
+        from log_redaction.crypto import is_encrypted_file
+        assert is_encrypted_file(out) is True
+        assert is_encrypted_file(audit_enc) is True
+
+        verify_result = runner.invoke(
+            app,
+            ["verify", str(audit_enc), "-E", "strongpassword123"],
+        )
+        assert verify_result.exit_code == 0
+        assert "完整有效" in verify_result.stdout
+
+        decrypted_out = tmp_path / "decrypted.log"
+        decrypt_result = runner.invoke(
+            app,
+            ["decrypt", str(out), str(decrypted_out), "-E", "strongpassword123"],
+        )
+        assert decrypt_result.exit_code == 0
+        content = decrypted_out.read_text(encoding="utf-8")
+        assert "138****5678" in content
+        assert "139****8888" in content
+        assert "a****@example.com" in content
+
+        decrypted_audit = tmp_path / "decrypted_audit.json"
+        decrypt_audit_result = runner.invoke(
+            app,
+            [
+                "decrypt",
+                str(audit_enc),
+                str(decrypted_audit),
+                "-E",
+                "strongpassword123",
+            ],
+        )
+        assert decrypt_audit_result.exit_code == 0
+        audit_data = json.loads(decrypted_audit.read_text(encoding="utf-8"))
+        assert audit_data["summary"]["total_count"] == 3
+        assert audit_data["hash_chain"]["valid"] is True
+        assert len(audit_data["entries"]) == 3
